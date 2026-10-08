@@ -18,7 +18,8 @@ import select
 import subprocess
 import sys
 import threading
-
+from glob import glob
+from pathlib import Path
 
 # rsync lines that only appear after SSH authentication has succeeded.
 # Seeing any of these means it's safe to start the next worker.
@@ -50,21 +51,28 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("source", help="Directory whose immediate subdirectories will be copied")
+    parser.add_argument(
+        "source", help="Directory whose immediate subdirectories will be copied"
+    )
     parser.add_argument("destination", help="Destination directory")
-    parser.add_argument("num_processes", type=int, help="Number of parallel rsync workers")
+    parser.add_argument(
+        "num_processes", type=int, help="Number of parallel rsync workers"
+    )
+    parser.add_argument(
+        "--glob", type=str, default="*", help="Glob pattern to match subdirectories"
+    )
     return parser.parse_args()
 
 
-def get_subdirectories(directory: str) -> list[str]:
+def get_subdirectories(directory: str, glob_pattern: str) -> list[str]:
     """Return sorted list of immediate subdirectory paths inside *directory*."""
     try:
-        entries = list(os.scandir(directory))
+        entries = [Path(e) for e in glob(os.path.join(directory, glob_pattern))]
     except FileNotFoundError:
         sys.exit(f"Error: source directory '{directory}' does not exist.")
     except PermissionError:
         sys.exit(f"Error: permission denied reading '{directory}'.")
-    return sorted(e.path for e in entries if e.is_dir())
+    return sorted(str(e) for e in entries if e.is_dir())
 
 
 def divide_into_groups(items: list, n: int) -> list[list]:
@@ -199,7 +207,7 @@ def main() -> None:
     if args.num_processes < 1:
         sys.exit("Error: num_processes must be at least 1.")
 
-    subdirs = get_subdirectories(args.source)
+    subdirs = get_subdirectories(args.source, args.glob)
     if not subdirs:
         sys.exit(f"No subdirectories found in '{args.source}'. Nothing to do.")
 
@@ -235,8 +243,17 @@ def main() -> None:
 
         t = threading.Thread(
             target=run_worker,
-            args=(group, args.destination, label, colour, lock, exit_codes, i,
-                  auth_event, output_allowed),
+            args=(
+                group,
+                args.destination,
+                label,
+                colour,
+                lock,
+                exit_codes,
+                i,
+                auth_event,
+                output_allowed,
+            ),
             daemon=True,
         )
         t.start()
@@ -250,7 +267,7 @@ def main() -> None:
             print()  # visual separator before the next "Starting" banner
 
     # Every worker has authenticated; release buffered output for all of them.
-    print(f"\nAll workers running — resuming output.\n")
+    print("\nAll workers running — resuming output.\n")
     output_allowed.set()
 
     for t in threads:
