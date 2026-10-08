@@ -14,6 +14,7 @@ worker label so you can tell streams apart at a glance.
 import argparse
 import os
 import pty
+import re
 import select
 import subprocess
 import sys
@@ -22,14 +23,16 @@ import time
 from glob import glob
 from pathlib import Path
 
-# rsync lines that only appear after SSH authentication has succeeded.
-# Seeing any of these means it's safe to start the next worker.
-_AUTH_MARKERS = (
-    "sending incremental file list",
-    "receiving incremental file list",
-    "building file list",
-    "Number of files:",
-    "Transfer starting:",
+# Matches rsync --info=progress2 lines, e.g.:
+#   22,937,600   0%  614.44kB/s   30:37:01
+#   53,687,091,200 100%  106.86MB/s    0:08:18 (xfr#1, to-chk=0/2)
+_PROGRESS_RE = re.compile(
+    r"^\s*"       # optional leading whitespace
+    r"[\d,]+"     # bytes transferred:  22,937,600
+    r"\s+\d+%"    # percentage:         0%
+    r"\s+[\d.]+"  # speed value:        614.44
+    r"\s*\w+/s"   # speed unit:         kB/s  MB/s  B/s …
+    r"\s+[\d:]+"  # time remaining:     30:37:01
 )
 
 # Maximum rate at which each worker may print lines to the console.
@@ -187,7 +190,7 @@ def run_worker(
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
 
-                if not auth_signaled and line:
+                if not auth_signaled and _PROGRESS_RE.match(line):
                     auth_signaled = True
                     auth_event.set()
 
