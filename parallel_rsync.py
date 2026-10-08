@@ -1,4 +1,4 @@
-#!/usr/bin/env python3 -u
+#!/usr/bin/env -S python3.11 -u
 """
 parallel_rsync.py - Copy subdirectories in parallel using multiple rsync processes.
 
@@ -18,6 +18,7 @@ import select
 import subprocess
 import sys
 import threading
+import time
 from glob import glob
 from pathlib import Path
 
@@ -30,6 +31,9 @@ _AUTH_MARKERS = (
     "Number of files:",
     "Transfer starting:",
 )
+
+# Maximum rate at which each worker may print lines to the console.
+_OUTPUT_INTERVAL = 10.0  # seconds
 
 # ANSI colour codes for worker labels (cycles if there are more workers than colours)
 _COLOURS = [
@@ -112,7 +116,7 @@ def run_worker(
     prompts for workers that are still starting up.
     """
     dest = destination.rstrip("/") + "/"
-    cmd = ["rsync", "-av"] + group + [dest]
+    cmd = ["rsync", "-a", "--info=progress2", "--no-inc-recursive"] + group + [dest]
 
     with lock:
         sys.stdout.write(f"{colour}{label}{_RESET} {' '.join(cmd)}\n")
@@ -136,9 +140,12 @@ def run_worker(
     auth_signaled = False
     buf = ""
     held: list[str] = []  # lines buffered until output_allowed is set
+    last_printed_at: float = 0.0
 
-    def emit(line: str) -> None:
-        """Print *line* immediately if output is open, otherwise buffer it."""
+    def _raw_emit(line: str) -> None:
+        """Send *line* to stdout or the held buffer, bypassing the throttle."""
+        if not line:
+            return
         if output_allowed.is_set():
             _flush_held(held, colour, label, lock)
             with lock:
@@ -146,6 +153,14 @@ def run_worker(
                 sys.stdout.flush()
         else:
             held.append(line)
+
+    def emit(line: str) -> None:
+        """Rate-limit output to at most one line per _OUTPUT_INTERVAL seconds."""
+        nonlocal last_printed_at
+        now = time.monotonic()
+        if now - last_printed_at >= _OUTPUT_INTERVAL:
+            _raw_emit(line)
+            last_printed_at = now
 
     try:
         while True:
@@ -164,12 +179,15 @@ def run_worker(
                 break
             if not chunk:
                 break
+            # Normalise line endings so that bare \r (used by rsync's
+            # --info=progress2 to overwrite the current line) is treated as a
+            # line boundary, the same as \n. Do \r\n first to avoid doubling.
+            chunk = chunk.replace("\r\n", "\n").replace("\r", "\n")
             buf += chunk
             while "\n" in buf:
                 line, buf = buf.split("\n", 1)
-                line = line.rstrip("\r")  # PTY line discipline inserts CR before LF
 
-                if not auth_signaled and any(m in line for m in _AUTH_MARKERS):
+                if not auth_signaled and line:
                     auth_signaled = True
                     auth_event.set()
 
@@ -179,7 +197,7 @@ def run_worker(
 
     # Flush any partial line that had no trailing newline
     if buf.strip():
-        emit(buf.rstrip("\r"))
+        emit(buf)
 
     # Always signal so the startup loop is never left waiting
     auth_event.set()
